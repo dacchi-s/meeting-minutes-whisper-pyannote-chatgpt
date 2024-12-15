@@ -191,7 +191,7 @@ python meeting-minutes-whisper-pyannote-chatgpt.py [audio_file] [options]
 
 ```
 --model {tiny,base,small,medium,large,large-v2,large-v3}
-                      Whisper model to use
+                      Whisper model to use (default: base)
 --openai_model OPENAI_MODEL
                       OpenAI model to use for minutes generation (default: gpt-4o-mini)
 --num_speakers NUM_SPEAKERS
@@ -200,12 +200,14 @@ python meeting-minutes-whisper-pyannote-chatgpt.py [audio_file] [options]
                       Minimum number of speakers
 --max_speakers MAX_SPEAKERS
                       Maximum number of speakers
+--output_language {japanese,english}
+                      Language for the output transcription and minutes (default: japanese)
 ```
 
 ### Example
 
 ```bash
-python meeting-minutes-whisper-pyannote-chatgpt.py meeting.mp4 --model large-v3 --min_speakers 1 --max_speakers 2 --openai_model gpt-4o
+python meeting-minutes-whisper-pyannote-chatgpt.py meeting.mp4 --model large-v3 --min_speakers 1 --max_speakers 2 --openai_model gpt-4o --output_language english
 ```
 
 ### File Transfer
