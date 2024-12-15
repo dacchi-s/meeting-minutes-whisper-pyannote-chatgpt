@@ -175,6 +175,69 @@ def count_tokens(text):
     encoding = tiktoken.encoding_for_model("gpt-4-turbo")
     return len(encoding.encode(text))
 
+def translate_text(text, target_language, model="gpt-4o-mini"):
+    """Translate text using the OpenAI API"""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    
+    system_prompt = f"Translate the following text to {target_language}. Maintain the original meaning and nuance."
+    
+    try:
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            model=model,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Translation error: {e}")
+        return None
+
+def process_transcription(transcription, segments, output_language, detected_language=None):
+    """Process transcription and translate if necessary"""
+    if not detected_language:
+        # More accurate language detection
+        japanese_chars = len([c for c in transcription if ord(c) > 0x3040 and ord(c) < 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF])
+        total_chars = len(transcription)
+        detected_language = "japanese" if japanese_chars / total_chars > 0.1 else "english"
+    
+    need_translation = detected_language != output_language
+    
+    if need_translation:
+        print(f"Translating from {detected_language} to {output_language}")
+        
+        # Translation considering chunk size constraints
+        max_chunk_size = 4000  # Consider OpenAI API limits
+        translated_segments = []
+        current_chunk = []
+        current_length = 0
+        
+        for i, segment in enumerate(segments):
+            current_chunk.append((i, segment['text']))
+            current_length += len(segment['text'])
+            
+            if current_length >= max_chunk_size or i == len(segments) - 1:
+                # Translate current chunk
+                chunk_text = "\n\n".join([f"[{idx}] {text}" for idx, text in current_chunk])
+                translated_chunk = translate_text(chunk_text, output_language)
+                
+                if translated_chunk:
+                    # Distribute translated text to corresponding segments
+                    chunk_parts = translated_chunk.split("\n\n")
+                    for j, (idx, _) in enumerate(current_chunk):
+                        if j < len(chunk_parts):
+                            translated_part = chunk_parts[j].split("] ", 1)[1] if "] " in chunk_parts[j] else chunk_parts[j]
+                            segments[idx]['original_text'] = segments[idx]['text']
+                            segments[idx]['text'] = translated_part
+                
+                # Reset chunk
+                current_chunk = []
+                current_length = 0
+    
+    return segments
+
 def split_transcript(transcript, max_tokens_per_chunk):
     words = transcript.split()
     chunks = []
@@ -196,91 +259,67 @@ def split_transcript(transcript, max_tokens_per_chunk):
 
     return chunks
 
-def merge_minutes(minutes_list):
-    """複数の議事録をマージして一つの整形された議事録にする"""
-    final_minutes = {
-        "概要": [],
-        "主要な議題と決定事項": [],
-        "アクションアイテム": [],
-        "参加者の主な発言": [],
-        "次回に向けての課題": []
-    }
+def merge_minutes(minutes_list, output_language="japanese"):
+    """Merge multiple meeting minutes into a single formatted document"""
+    # Set section names based on language
+    if output_language == "japanese":
+        sections = {
+            "概要": [],
+            "主要な議題と決定事項": [],
+            "アクションアイテム": [],
+            "参加者の主な発言": [],
+            "次回に向けての課題": []
+        }
+    else:
+        sections = {
+            "Overview": [],
+            "Key Topics and Decisions": [],
+            "Action Items": [],
+            "Key Statements from Participants": [],
+            "Issues for Next Meeting": []
+        }
     
     for minutes in minutes_list:
-        sections = minutes.split("■")
-        for section in sections:
+        sections_split = minutes.split("■")
+        for section in sections_split:
             section = section.strip()
             if not section:
                 continue
             
-            if "概要" in section:
-                content = section.split("概要", 1)[1].strip()
-                if content and content not in final_minutes["概要"]:
-                    final_minutes["概要"].append(content)
-            
-            elif "主要な議題と決定事項" in section:
-                content = section.split("主要な議題と決定事項", 1)[1].strip()
-                if content:
-                    items = [item.strip() for item in content.split("\n") if item.strip()]
-                    for item in items:
-                        if item not in final_minutes["主要な議題と決定事項"]:
-                            final_minutes["主要な議題と決定事項"].append(item)
-            
-            elif "アクションアイテム" in section:
-                content = section.split("アクションアイテム", 1)[1].strip()
-                if content:
-                    items = [item.strip() for item in content.split("\n") if item.strip() and item.startswith("-")]
-                    for item in items:
-                        if item not in final_minutes["アクションアイテム"]:
-                            final_minutes["アクションアイテム"].append(item)
-            
-            elif "参加者の主な発言" in section:
-                content = section.split("参加者の主な発言", 1)[1].strip()
-                if content:
-                    items = [item.strip() for item in content.split("\n") if item.strip()]
-                    for item in items:
-                        if item not in final_minutes["参加者の主な発言"]:
-                            final_minutes["参加者の主な発言"].append(item)
-            
-            elif "次回に向けての課題" in section:
-                content = section.split("次回に向けての課題", 1)[1].strip()
-                if content:
-                    items = [item.strip() for item in content.split("\n") if item.strip() and item.startswith("-")]
-                    for item in items:
-                        if item not in final_minutes["次回に向けての課題"]:
-                            final_minutes["次回に向けての課題"].append(item)
+            for key in sections.keys():
+                if key in section:
+                    content = section.split(key, 1)[1].strip()
+                    if content:
+                        items = [item.strip() for item in content.split("\n") if item.strip()]
+                        for item in items:
+                            # For action items and issues, only add items that start with "-"
+                            if (key in ["アクションアイテム", "次回に向けての課題", "Action Items", "Issues for Next Meeting"]):
+                                if item.startswith("-") and item not in sections[key]:
+                                    sections[key].append(item)
+                            # For other sections, add all non-empty items
+                            elif item not in sections[key]:
+                                sections[key].append(item)
     
-    # 最終的な議事録の形式に整形
+    # Format the final minutes
     formatted_minutes = []
-    formatted_minutes.append("■ 概要")
-    formatted_minutes.append("\n".join(final_minutes["概要"]))
     
-    formatted_minutes.append("\n\n■ 主要な議題と決定事項")
-    formatted_minutes.append("\n".join(final_minutes["主要な議題と決定事項"]))
-    
-    formatted_minutes.append("\n\n■ アクションアイテム")
-    formatted_minutes.append("\n".join(final_minutes["アクションアイテム"]))
-    
-    formatted_minutes.append("\n\n■ 参加者の主な発言")
-    formatted_minutes.append("\n".join(final_minutes["参加者の主な発言"]))
-    
-    formatted_minutes.append("\n\n■ 次回に向けての課題")
-    formatted_minutes.append("\n".join(final_minutes["次回に向けての課題"]))
+    # Add each section with its content
+    for key, items in sections.items():
+        formatted_minutes.append(f"■ {key}")
+        if items:
+            formatted_minutes.append("\n".join(items))
+        else:
+            # Add placeholder text for empty sections
+            placeholder = "該当なし" if output_language == "japanese" else "None"
+            formatted_minutes.append(placeholder)
+        formatted_minutes.append("")  # Add empty line between sections
     
     return "\n".join(formatted_minutes)
 
-def generate_minutes(speaker_segments, model="gpt-4o-mini"):
-    """会話の書き起こしから議事録を生成する"""
-    print(f"Generating meeting minutes using OpenAI API with model: {model}")
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    transcript = "\n".join([f"Speaker {seg['speaker']} [{seg['start']} - {seg['end']}]: {seg['text']}" 
-                           for seg in speaker_segments])
-    max_tokens_per_chunk = 4096
-    chunks = split_transcript(transcript, max_tokens_per_chunk)
-    all_minutes = []
-
-    system_prompt = """以下の会話の議事録を作成してください。
+def get_minutes_prompt(language):
+    """Return the minutes generation prompt based on language"""
+    if language == "japanese":
+        return """以下の会話の議事録を作成してください。
 
 要件：
 1. 重要な議題、決定事項、アクションアイテムを明確に抽出してください
@@ -311,20 +350,76 @@ def generate_minutes(speaker_segments, model="gpt-4o-mini"):
 ■ 次回に向けての課題
 - [課題1]
 - [課題2]
+            """
+    else:
+        return """Create meeting minutes for the following conversation.
+
+Requirements:
+1. Clearly extract important topics, decisions, and action items
+2. Summarize key statements and contributions from each speaker concisely
+3. Organize chronologically to show the flow of discussion
+4. Maintain technical terms and specialized vocabulary
+5. Omit redundant expressions and duplicate content
+
+Output Format:
+■ Overview
+[Overall meeting summary]
+
+■ Key Topics and Decisions
+1. [Topic 1]
+   - Decision:
+   - Discussion Points:
+
+2. [Topic 2]
+   ...
+
+■ Action Items
+- [Person/Team]: [Task] (Include deadline if specified)
+
+■ Key Statements from Participants
+- Speaker XXXX:
+  - [Important statements]
+
+■ Issues for Next Meeting
+- [Issue 1]
+- [Issue 2]
 """
 
+def generate_minutes(speaker_segments, output_language="japanese", model="gpt-4o-mini"):
+    """Generate meeting minutes from speaker segments"""
+    print(f"Generating meeting minutes in {output_language} using OpenAI API with model: {model}")
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    # Prepare transcript with speaker information
+    transcript = "\n".join([f"Speaker {seg['speaker']} [{seg['start']:.2f} - {seg['end']:.2f}]: {seg['text']}" 
+                           for seg in speaker_segments])
+    max_tokens_per_chunk = 4096  # Adjust based on model limits
+    chunks = split_transcript(transcript, max_tokens_per_chunk)
+    all_minutes = []
+
+    # Get language-specific prompt
+    system_prompt = get_minutes_prompt(output_language)
+
+    # Process each chunk
     for i, chunk in enumerate(chunks):
+        # Add context information for better continuity
         context = ""
         if i > 0:
-            context += "（前のセッションの続き）\n\n"
+            # Include last part of previous chunk
+            prev_context = chunks[i-1].split("\n")[-3:]  # Last 3 lines
+            context += "Previous context:\n" + "\n".join(prev_context) + "\n\n"
+            
         if i < len(chunks) - 1:
-            context += "\n\n（次のセッションに続く）"
+            # Include beginning of next chunk
+            next_context = chunks[i+1].split("\n")[:3]  # First 3 lines
+            context += "\n\nNext context:\n" + "\n".join(next_context)
         
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context + chunk}
+            {"role": "user", "content": f"{context}\n\nCurrent segment:\n{chunk}"}
         ]
 
+        # Retry logic for API calls
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -339,12 +434,17 @@ def generate_minutes(speaker_segments, model="gpt-4o-mini"):
 
                 if response.choices and len(response.choices) > 0:
                     minutes = response.choices[0].message.content.strip()
-                    if not any(section in minutes for section in ["概要", "主要な議題", "アクションアイテム"]):
+                    # Verify required sections based on language
+                    expected_sections = ["概要", "主要な議題", "アクションアイテム"] if output_language == "japanese" \
+                        else ["Overview", "Key Topics", "Action Items"]
+                    
+                    if not any(section in minutes for section in expected_sections):
                         raise ValueError("Invalid minutes format received")
+                    
                     all_minutes.append(minutes)
                     break
                 else:
-                    print("No choices in the response")
+                    print("No response choices received from API")
                     if attempt == max_retries - 1:
                         return None
             except Exception as e:
@@ -353,9 +453,12 @@ def generate_minutes(speaker_segments, model="gpt-4o-mini"):
                     return None
                 continue
 
-    # すべてのチャンクの議事録をマージ
-    final_minutes = merge_minutes(all_minutes)
-    return final_minutes
+    # Merge all chunks into final minutes
+    if all_minutes:
+        final_minutes = merge_minutes(all_minutes, output_language)
+        return final_minutes
+    
+    return None
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Speech to Text with Speaker Diarization")
@@ -367,6 +470,10 @@ def parse_arguments():
     parser.add_argument("--num_speakers", type=int, help="Number of speakers (if known)")
     parser.add_argument("--min_speakers", type=int, help="Minimum number of speakers")
     parser.add_argument("--max_speakers", type=int, help="Maximum number of speakers")
+    parser.add_argument("--output_language", choices=["japanese", "english"], default="japanese",
+                        help="Language for the output (transcription and minutes)")
+    parser.add_argument("--detect_language", action="store_true",
+                        help="Automatically detect input language using Whisper")
     return parser.parse_args()
 
 def main(args):
@@ -381,24 +488,29 @@ def main(args):
         audio_file = convert_to_wav(audio_file)
     
     transcription, segments = transcribe_audio(audio_file, args.model)
-    print(f"Transcription: {transcription}")
+    processed_segments = process_transcription(transcription, segments, args.output_language)
+    
     diarization = diarize_audio(audio_file, num_speakers=args.num_speakers, 
-                                min_speakers=args.min_speakers, max_speakers=args.max_speakers)
-    speaker_segments = assign_speakers_to_segments(segments, diarization)
+                               min_speakers=args.min_speakers, max_speakers=args.max_speakers)
+    speaker_segments = assign_speakers_to_segments(processed_segments, diarization)
 
-    output_file = os.path.splitext(audio_file)[0] + "_output.txt"
+    # Output transcription (includes original text if translation exists)
+    output_file = os.path.splitext(audio_file)[0] + f"_output_{args.output_language}.txt"
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("Speakers assigned to segments\n")
+        f.write(f"Transcription in {args.output_language}\n")
         for segment in speaker_segments:
             segment_text = f"Speaker {segment['speaker']} [{segment['start']} - {segment['end']}]: {segment['text']}"
+            if 'original_text' in segment:
+                segment_text += f"\nOriginal: {segment['original_text']}"
             print(segment_text)
             f.write(segment_text + "\n")
     
     print(f"Results written to {output_file}")
 
-    minutes = generate_minutes(speaker_segments, model=args.openai_model)
+    # Generate meeting minutes
+    minutes = generate_minutes(speaker_segments, output_language=args.output_language, model=args.openai_model)
     if minutes is not None:
-        minutes_file = os.path.splitext(audio_file)[0] + "_minutes.txt"
+        minutes_file = os.path.splitext(audio_file)[0] + f"_minutes_{args.output_language}.txt"
         with open(minutes_file, 'w', encoding='utf-8') as f:
             f.write(minutes)
         print(f"Meeting minutes written to {minutes_file}")
