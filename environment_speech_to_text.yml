@@ -1,0 +1,21 @@
+name: speech-to-text
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - cudatoolkit=11.8
+  - tiktoken
+  - pip:
+    - openai-whisper
+    - pyannote.audio
+    - pydub==0.25.1
+    - torch
+    - torchvision
+    - torchaudio
+    - moviepy
+    - openai
+    - python-dotenv
